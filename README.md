@@ -15,7 +15,12 @@ This repo is implementation for the accepted paper "[Model Watermarking for Imag
 ## How to run
 
 ### Initial Training Stage 
+Initial 训练阶段主要是训练嵌入子网络H和提取子网络R。
+主要是借助于Unet网络结构对水印图像进行嵌入和提取。
+该阶段使用了鉴别器D，来识别嵌入水印后的图像的真假，以更好地将水印嵌入到宿主图像中。
 
+Initial Stage阶段的损失都是计算嵌入水印后的图像和B域图像的diff，所以，H不仅有嵌入水印的功能，也有去噪的功能。
+也就是说，训练好的H = 原始Imgae-Image任务的模型M + 嵌入水印的模型H'
 ```
 ## cd ./Initial stage
 
@@ -24,6 +29,11 @@ python main.py
 
 ### Surrogate Model Attack 
 
+这个阶段，我本以为作者会使用Initial阶段得到的带有水印的图像来训练代理模型，但其实这个阶段作者只是在完成Image-Image的Original工作：如derain任务。
+具体来说，就是将带有雨线噪声的图像输入到GAN网络中，生成一个不带有雨线的图像，以达到图像去噪的效果。
+但是，SM攻击呢？
+
+运行SR stage模型时，batchsz=16只占用了10G左右显存。但是运行Initial Stage阶段，24G显存只能支撑batchsize=4
 ```
 ## cd ./SR attack
 

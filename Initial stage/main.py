@@ -1,10 +1,11 @@
 # encoding: utf-8
 
-
+import re
 import argparse
 import os
 import shutil
 import socket
+from sys import path
 import time
 
 import torch
@@ -41,7 +42,7 @@ def main():
 
     #opt = parser.parse_args()
     opt = parameter_parser()
-    if torch.cuda.is_available() and not opt.cuda:
+    if torch.cuda.is_available() and opt.cuda:
         print("WARNING: You have a CUDA device, "
               "so you should probably run with --cuda")
 
@@ -49,37 +50,40 @@ def main():
 
     ############  create the dirs to save the result #############
 
-    cur_time = time.strftime('%Y-%m-%d-%H_%M_%S', time.localtime())
-    #experiment_dir = opt.hostname + "_" + opt.remark # + "_" + cur_time
-    experiment_dir = cur_time
-    opt.outckpts += experiment_dir + "/checkPoints"
-    opt.trainpics += experiment_dir + "/trainPics"
-    opt.validationpics += experiment_dir + "/validationPics"
-    opt.outlogs += experiment_dir + "/trainingLogs"
-    opt.outcodes += experiment_dir + "/codes"
-    opt.testPics += experiment_dir + "/testPics"
-    opt.runfolder += experiment_dir + "/run"
+    cur_time = time.strftime('%Y-%m-%d-%H_%M', time.localtime())
+    # '/home/ay3/houls/watermark_dataset/derain/IniStage'
+    IniStageRoot = opt.IniStageRoot
+    # result/derain_flower_Init/2021-09-24-21_50_35
+    ResultRoot = os.path.join(opt.resultroot, cur_time)
+    # 保存模型输出的图像
+    PicsDir = os.path.join(ResultRoot, 'pics')
+    ModelRuns = os.path.join(ResultRoot, 'modelrun')
+    trainpicsDir = os.path.join(PicsDir, 'trainpics')
+    validpicsDir = os.path.join(PicsDir, 'validpics')
+    testpicsDir = os.path.join(PicsDir, 'testpics')
+    #保存模型运行中的一些数据
+    # runfolder保存模型的writter结果，需要分train/valid/test
+    outckptsDir = os.path.join(ModelRuns, 'outckpts')
+    outcodesDir = os.path.join(ModelRuns, 'outcodes')
+    runfolderDir = os.path.join(ModelRuns, 'runfolder')
 
-    print(opt.outckpts)
-    if not os.path.exists(opt.outckpts):
-        os.makedirs(opt.outckpts)
-    if not os.path.exists(opt.trainpics):
-        os.makedirs(opt.trainpics)
-    if not os.path.exists(opt.validationpics):
-        os.makedirs(opt.validationpics)
-    if not os.path.exists(opt.outlogs):
-        os.makedirs(opt.outlogs)
-    if not os.path.exists(opt.outcodes):
-        os.makedirs(opt.outcodes)
-    if not os.path.exists(opt.runfolder):
-        os.makedirs(opt.runfolder)
-    if (not os.path.exists(opt.testPics)) and opt.test != '':
-        os.makedirs(opt.testPics)
+    if not os.path.exists(trainpicsDir):
+        os.makedirs(trainpicsDir)
+    if not os.path.exists(validpicsDir):
+        os.makedirs(validpicsDir)
+    if not os.path.exists(testpicsDir):
+        os.makedirs(testpicsDir)
+    if not os.path.exists(outckptsDir):
+        os.makedirs(outckptsDir)
+    if not os.path.exists(outcodesDir):
+        os.makedirs(outcodesDir)
+    if not os.path.exists(runfolderDir):
+        os.makedirs(runfolderDir)
 
-    logPath = opt.outlogs + \
-        '/%s_batchsz_%d_log.txt' % (opt.dataset, opt.batchSize)
+    logPath = ModelRuns + \
+        '/batchsz_%d_log.txt' % (opt.batchSize)
 
-    #print_log(str(opt), logPath)
+    print_log(str(opt), logPath)
     # 给当前代码进行备份
     save_current_codes(opt.outcodes)
     # tensorboardX writer
@@ -87,9 +91,9 @@ def main():
                            comment='**' + opt.hostname + "_" + opt.remark)
 
     # E：/derain
-    DATA_DIR = opt.datasets
-    traindir = os.path.join(DATA_DIR, 'train')
-    valdir = os.path.join(DATA_DIR, 'valid')
+    traindir = os.path.join(IniStageRoot, 'train')
+    valdir = os.path.join(IniStageRoot, 'valid')
+    testdir = os.path.join(IniStageRoot, 'test')
     #print(f'traindir: {traindir}')
     #print(f'valdir: {valdir}')
 
@@ -100,10 +104,16 @@ def main():
             trans.Grayscale(num_output_channels=1),
             # Convert a PIL Image or numpy.ndarray to tensor.
             transforms.ToTensor(),
-
         ]))
     val_dataset = MyImageFolder(
         valdir,
+        transforms.Compose([
+            trans.Grayscale(num_output_channels=1),
+            transforms.ToTensor(),
+        ]))
+
+    test_dataset = MyImageFolder(
+        testdir,
         transforms.Compose([
             trans.Grayscale(num_output_channels=1),
             transforms.ToTensor(),
@@ -114,7 +124,8 @@ def main():
 
     val_loader = DataLoader(val_dataset, batch_size=opt.batchSize,
                             shuffle=False, num_workers=int(opt.workers))
-
+    test_loader = DataLoader(test_dataset, batch_size=1,
+                             shuffle=False, num_workers=int(opt.workers))
     # Hnet的输出结果为灰度图像
     Hnet = UnetGenerator(input_nc=2, output_nc=1,
                          num_downs=opt.num_downs, output_function=nn.Sigmoid)
@@ -134,11 +145,12 @@ def main():
     # Calculate output of image discriminator (PatchGAN)
     # 幂运算优先级比较高
     # 将图像大小缩小为原来的1/16
-    # patch = (1, opt.imageSize // 2 ** 4, opt.imageSize // 2 ** 4)
-    
-    #patch = (1, 32 , 32)
-    patch = (1, 16 , 16)
+    patch = (1, opt.imageSize // 2 ** 4, opt.imageSize // 2 ** 4)
 
+    # for 512
+    #patch = (1, 32 , 32)
+    # for 256
+    #patch = (1, 16 , 16)
 
     # setup optimizer
     optimizerH = optim.Adam(Hnet.parameters(), lr=opt.lr,
@@ -162,19 +174,19 @@ def main():
         Hnet.load_state_dict(torch.load(opt.Hnet))
     if opt.cuda and opt.ngpu > 1:
         Hnet = torch.nn.DataParallel(Hnet).cuda()
-    #print_network(Hnet)
+    # print_network(Hnet)
 
     if opt.Rnet != '':
         Rnet.load_state_dict(torch.load(opt.Rnet))
     if opt.cuda and opt.ngpu > 1:
         Rnet = torch.nn.DataParallel(Rnet).cuda()
-    #print_network(Rnet)
+    # print_network(Rnet)
 
     if opt.Dnet != '':
         Dnet.load_state_dict(torch.load(opt.Dnet))
     if opt.cuda and opt.ngpu > 1:
         Dnet = torch.nn.DataParallel(Dnet).cuda()
-    #print_network(Dnet)
+    # print_network(Dnet)
 
     # define loss
     if torch.cuda.is_available() and opt.cuda:
@@ -188,7 +200,7 @@ def main():
         criterion_pixelwise = nn.L1Loss()
         vgg = Vgg16(requires_grad=False)
 
-    smallestLoss = 10000
+    smallestLoss = 100000
     print_log(
         "training is beginning .......................................................", logPath)
     for epoch in tqdm(range(opt.niter), desc=f" {opt.niter} epochs"):
@@ -209,15 +221,40 @@ def main():
             globals()["smallestLoss"] = val_sumloss
 
             torch.save(Hnet.state_dict(),
-                       '%s/netH_epoch_%d,sumloss=%.6f,Hloss=%.6f.pth' % (
-                           opt.outckpts, epoch, val_sumloss, val_hloss))
+                       '%s/netH%d.pth' % (
+                           opt.outckpts, epoch))
             torch.save(Rnet.state_dict(),
-                       '%s/netR_epoch_%d,sumloss=%.6f,Rloss=%.6f.pth' % (
-                           opt.outckpts, epoch, val_sumloss, val_rloss))
+                       '%s/netR%d.pth' % (
+                           opt.outckpts, epoch))
             torch.save(Dnet.state_dict(),
-                       '%s/netD_epoch_%d,sumloss=%.6f,Dloss=%.6f.pth' % (
-                           opt.outckpts, epoch, val_sumloss, val_dloss))
-    writer.close()
+                       '%s/netD%d.pth' % (
+                           opt.outckpts, epoch))
+    # ///////////////////test////////////////////////
+    # test(test_loader)
+
+    def sort_list(list_model):
+        list_model.sort(key=lambda x: int(
+            re.match('^[a-z]*[A-Z]_epoch_([0-9]+)', x).group(1)))
+    Hmodels = []
+    Rmodels = []
+    Dmodels = []
+    model_dir = f"result/derain_flower_Init/modelrun/outckpts/{cur_time}"
+    for model in os.listdir(model_dir):
+        if "netH" in model:
+            Hmodels.append(model)
+        elif "netR" in model:
+            Rmodels.append(model)
+        else:
+            Dmodels.append(model)
+    sort_list(Hmodels)
+    sort_list(Rmodels)
+    # sort_list(Dmodels)
+    print(Hmodels[-1])
+    print(Rmodels[-1])
+
+    Hnet.load_state_dict(torch.load(os.path.join(model_dir, Hmodels[-1])))
+    Rnet.load_state_dict(torch.load(os.path.join(model_dir, Rmodels[-1])))
+    test(test_loader, Hnet, Rnet)
 
 
 def train(train_loader,  epoch, Hnet, Rnet, Dnet):
@@ -248,15 +285,19 @@ def train(train_loader,  epoch, Hnet, Rnet, Dnet):
 
     loader = transforms.Compose([trans.Grayscale(num_output_channels=1),
                                  transforms.ToTensor(), ])
-    clean_path = os.path.join(os.getcwd(), "secret\\clean.png")
-    #print(os.getcwd())
+    clean_path = os.path.join(os.getcwd(), "secret/clean.png")
+    # print(os.getcwd())
     #clean_img = Image.open("../secret/clean.png")
     clean_img = Image.open(clean_path)
     clean_img = loader(clean_img)
-    secret_path = os.path.join(os.getcwd(), "secret\\flower.png")
+    secret_path = os.path.join(os.getcwd(), "secret/flower.png")
     secret_img = Image.open(secret_path)
     #secret_img = Image.open("../secret/flower.png")
     secret_img = loader(secret_img)
+    #secret_img = secret_img.repeat(1, 1, 2, 2)
+
+    # repeat就是broadcast
+    #clean_img = clean_img.repeat(1, 1, 2, 2)
 
     start_time = time.time()
     for i, data in enumerate(train_loader, 0):
@@ -276,20 +317,18 @@ def train(train_loader,  epoch, Hnet, Rnet, Dnet):
         '''
         # cover_img_A = cover_img[:, :, 0:opt.imageSize, 0:opt.imageSize]
         # cover_img_B = cover_img[:, :, 0:opt.imageSize, opt.imageSize:]
+        #img_end = 1024
+        # img_end = 512
         cover_img_A = cover_img[:, :, 0:opt.imageSize, 0:opt.imageSize]
-        cover_img_B = cover_img[:, :, 0:opt.imageSize, opt.imageSize: 512]
+        cover_img_B = cover_img[:, :, 0:opt.imageSize,
+                                opt.imageSize: 2 * opt.imageSize]
+        #print(f'cover_img_B size: {cover_img_B.size()}')
 
-        #secret_img = secret_img.repeat(this_batch_size, 1, 2, 2)
         secret_img = secret_img.repeat(this_batch_size, 1, 1, 1)
         secret_img = secret_img[0:this_batch_size, :, :, :]
-        #print(f'secret size : {secret_img.size()}')
-
-        # repeat就是broadcast
-        #clean_img = clean_img.repeat(this_batch_size, 1, 2, 2)
         clean_img = clean_img.repeat(this_batch_size, 1, 1, 1)
         clean_img = clean_img[0:this_batch_size, :, :, :]
 
-        # 都是[16, 1, 256, 256]
         #print(f'secret_img size: {secret_img.size()}')
         #print(f'clean_img size: {clean_img.size()}')
 
@@ -300,8 +339,11 @@ def train(train_loader,  epoch, Hnet, Rnet, Dnet):
             secret_img = secret_img.cuda()
             clean_img = clean_img.cuda()
 
+        # 给B域的图像添加水印
         # 先在通道上将水印图像和B图像拼接起来，得到concat_img
-        # [16, 2, 256, 256]                                  
+        # [16, 2, 256, 256]
+        #print(f'cover_img_B size: {cover_img_B.size()}')
+        #print(f'secret_img size: {secret_img.size()}')
         concat_img = torch.cat([cover_img_B, secret_img], dim=1)
         #print(f'concat_img: {concat_img.size()}')
         concat_imgv = Variable(concat_img)
@@ -316,7 +358,7 @@ def train(train_loader,  epoch, Hnet, Rnet, Dnet):
         # Adversarial ground truths
         # patch = (1, opt.imageSize // 2 ** 4, opt.imageSize // 2 ** 4)
         # imageSize = 256
-        
+
         # valid: [batchsz, 1 , 16 , 16]
         valid = Variable(
             Tensor(np.ones((cover_imgv.size(0), *patch))), requires_grad=False)
@@ -331,6 +373,7 @@ def train(train_loader,  epoch, Hnet, Rnet, Dnet):
 
         gan_loss = criterion_GAN(pred_fake, valid)
         # pixel_loss计算的是wm损失：嵌入水印后的图像b'和真实图像b的距离
+        # 这里的损失都是计算嵌入水印后的图像和B域图像的diff，所以，H不仅有嵌入水印的功能，也有去噪的功能
         pixel_loss = criterion_pixelwise(container_img, cover_imgv)  # l1
         # 嵌入水印和没有嵌入水印的图像的通道数变为原来的3倍
         container_img_rgb = container_img.repeat(1, 3, 1, 1)
@@ -340,7 +383,7 @@ def train(train_loader,  epoch, Hnet, Rnet, Dnet):
         vgg_loss = mse_loss(vgg(container_img_rgb).relu2_2,
                             vgg(cover_imgv_rgb).relu2_2)
 
-        # 嵌入损失： mse_loss(baseloss) 、 gan_loss 、 vgg_loss 、 pixel_loss?? 
+        # 嵌入损失： mse_loss(baseloss) 、 gan_loss 、 vgg_loss 、 pixel_loss??
         # errH中为什么多了一个pixel_loss?
         errH = opt.betamse * mse_loss(container_img, cover_imgv) + opt.betagans * \
             gan_loss + opt.betapix * pixel_loss + opt.betavgg * vgg_loss
@@ -423,12 +466,12 @@ def train(train_loader,  epoch, Hnet, Rnet, Dnet):
         #     diff = 50 * (container_img - cover_imgv)
         #     save_result_pic(this_batch_size, cover_img_A, cover_imgv.data, container_img.data,
         #                     secret_img, rev_secret_img.data, clean_rev_secret_img_A.data, clean_rev_secret_img_B.data, diff.data, epoch, i, opt.trainpics)
-        #if epoch % 1 == 0 and i % opt.resultPicFrequency == 0:
+        # if epoch % 1 == 0 and i % opt.resultPicFrequency == 0:
         diff = 50 * (container_img - cover_imgv)
-        
-        with torch.no_grad():
-            save_result_pic(this_batch_size, cover_img_A, cover_imgv, container_img,
-                            secret_img, rev_secret_img, clean_rev_secret_img_A, clean_rev_secret_img_B, diff, epoch, i, opt.trainpics)
+        if i % opt.resultPicFrequency == 0:
+            with torch.no_grad():
+                save_result_pic(this_batch_size, cover_img_A, cover_imgv, container_img,
+                                secret_img, rev_secret_img, clean_rev_secret_img_A, clean_rev_secret_img_B, diff, epoch, i, opt.trainpics)
 
     epoch_log = "one epoch time is %.4f======================================================================" % (
         batch_time.sum) + "\n"
@@ -481,12 +524,12 @@ def validation(val_loader,  epoch, Hnet, Rnet, Dnet):
 
         loader = transforms.Compose(
             [trans.Grayscale(num_output_channels=1), transforms.ToTensor(), ])
-        clean_img = Image.open(os.path.join(os.getcwd(), "secret\\clean.png"))
+        clean_img = Image.open(os.path.join(os.getcwd(), "secret/clean.png"))
         #clean_img = Image.open("../secret/clean.png")
         clean_img = loader(clean_img)
         #secret_img = Image.open("../secret/flower.png")
         secret_img = Image.open(os.path.join(
-            os.getcwd(), "secret\\flower.png"))
+            os.getcwd(), "secret/flower.png"))
         secret_img = loader(secret_img)
 
         for i, data in enumerate(val_loader, 0):
@@ -519,11 +562,13 @@ def validation(val_loader,  epoch, Hnet, Rnet, Dnet):
             A_imgv = Variable(cover_img_A)
 
             # Adversarial ground truths
-            valid = Variable(
-                Tensor(np.ones((cover_imgv.size(0), *patch))), requires_grad=False)
-            fake = Variable(
-                Tensor(np.zeros((cover_imgv.size(0), *patch))), requires_grad=False)
             pred_fake = Dnet(container_img)
+            valid = Variable(
+                Tensor(np.ones((cover_imgv.size(0), pred_fake.size(1), pred_fake.size(2), pred_fake.size(3)))), requires_grad=False)
+            fake = Variable(
+                Tensor(np.zeros((cover_imgv.size(0), pred_fake.size(1), pred_fake.size(2), pred_fake.size(3)))), requires_grad=False)
+            #print(f'pred fake size:{pred_fake.size()}')
+            #print(f'valid size:{valid.size()}')
             gan_loss = criterion_GAN(pred_fake, valid)
 
             pixel_loss = criterion_pixelwise(container_img, cover_imgv)
@@ -582,11 +627,11 @@ def validation(val_loader,  epoch, Hnet, Rnet, Dnet):
             Pixellosses.update(pixel_loss.data, this_batch_size)
             Vgglosses.update(vgg_loss.data, this_batch_size)
 
-            if i % 50 == 0:
+            if i % 1000 == 0:
                 diff = 50 * (container_img - cover_imgv)
-                save_result_pic(this_batch_size, cover_img_A, cover_imgv.data, container_img.data,
-                                secret_img, rev_secret_img.data, clean_rev_secret_img_A.data, clean_rev_secret_img_B.data, diff.data, epoch, i, opt.validationpics)
-
+                with torch.no_grad():
+                    save_result_pic(this_batch_size, cover_img_A, cover_imgv, container_img,
+                                    secret_img, rev_secret_img, clean_rev_secret_img_A, clean_rev_secret_img_B, diff, epoch, i, opt.validationpics)
     val_hloss = Hlosses.avg
     val_rloss = Rlosses.avg
     val_r_mseloss = R_mselosses.avg
@@ -619,16 +664,91 @@ def validation(val_loader,  epoch, Hnet, Rnet, Dnet):
 
     print("#################################################### validation end ########################################################")
 
-    #return val_hloss, val_rloss, val_r_mseloss, val_r_consistloss, val_dloss, val_fakedloss, val_realdloss, val_Ganlosses, val_Pixellosses, vgg_loss, val_sumloss
+    # return val_hloss, val_rloss, val_r_mseloss, val_r_consistloss, val_dloss, val_fakedloss, val_realdloss, val_Ganlosses, val_Pixellosses, vgg_loss, val_sumloss
     return val_hloss, val_rloss, val_r_mseloss, val_r_consistloss, val_dloss, val_fakedloss, val_realdloss, val_Ganlosses, val_Pixellosses, val_Vgglosses, val_sumloss
 
 
+def test(test_loader, Hnet, Rnet):
+    print(
+        "#################################################### test begin ########################################################")
+    start_time = time.time()
+    Hnet.eval()
+    Rnet.eval()
+    # Tensor type
+    Tensor = torch.cuda.FloatTensor
+    if opt.cuda:
+        Hnet = Hnet.cuda()
+        Rnet = Rnet.cuda()
+
+    # print_network(Hnet)
+    with torch.no_grad():
+
+        loader = transforms.Compose(
+            [trans.Grayscale(num_output_channels=1), transforms.ToTensor(), ])
+        clean_img = Image.open(os.path.join(os.getcwd(), "secret/clean.png"))
+        #clean_img = Image.open("../secret/clean.png")
+        clean_img = loader(clean_img)
+        #secret_img = Image.open("../secret/flower.png")
+        secret_img = Image.open(os.path.join(
+            os.getcwd(), "secret/flower.png"))
+        secret_img = loader(secret_img)
+
+        for i, data in enumerate(test_loader, 0):
+
+            Hnet.zero_grad()
+            Rnet.zero_grad()
+            this_batch_size = int(data.size()[0])
+            cover_img = data[0:this_batch_size, :, :, :]
+            cover_img_A = cover_img[:, :, 0:256, 0:256]
+            cover_img_B = cover_img[:, :, 0:256, 256:512]
+
+            secret_img = secret_img.repeat(this_batch_size, 1, 1, 1)
+            secret_img = secret_img[0:this_batch_size, :, :, :]
+            clean_img = clean_img.repeat(this_batch_size, 1, 1, 1)
+            clean_img = clean_img[0:this_batch_size, :, :, :]
+
+            if opt.cuda:
+                cover_img = cover_img.cuda()
+                cover_img_A = cover_img_A.cuda()
+                cover_img_B = cover_img_B.cuda()
+                secret_img = secret_img.cuda()
+                clean_img = clean_img.cuda()
+
+            concat_img = torch.cat([cover_img_B, secret_img], dim=1)
+            concat_imgv = Variable(concat_img)
+            cover_imgv = Variable(cover_img_B)
+            # container_img带有水印的灰度图像
+            container_img = Hnet(concat_imgv)
+            A_imgv = Variable(cover_img_A)
+            # container_img的3通道形式的图像
+            container_img_rgb = container_img.repeat(1, 1, 1, 1)
+            # B的3通道形式的图像
+            cover_imgv_rgb = cover_imgv.repeat(1, 1, 1, 1)
+            cover_imgv_rgb.detach()
+            # rev_secret_img 恢复出来的水印
+            rev_secret_img = Rnet(container_img)
+            rev_secret_img_rgb = rev_secret_img.repeat(1, 1, 1, 1)
+            secret_imgv = Variable(secret_img)
+            # 从A和B中恢复出来的水印
+            clean_rev_secret_img_A = Rnet(A_imgv)
+            clean_rev_secret_img_B = Rnet(cover_imgv)
+
+            # if i % 1000 == 0:
+            diff = 50 * (container_img - cover_imgv)
+            with torch.no_grad():
+                save_result_pic(this_batch_size, cover_img_A, cover_imgv, container_img_rgb,
+                                secret_img, rev_secret_img_rgb, clean_rev_secret_img_A, clean_rev_secret_img_B, diff, 00, i, opt.testPics)
+
+    print("#################################################### test end ########################################################")
+
 # custom weights initialization called on netG and netD
+
+
 def weights_init(m):
     # 获取模型名称
     classname = m.__class__.__name__
     # m.__class__.__name__为：Conv2d 、 LeakyReLU等内容
-    #print(classname)
+    # print(classname)
     if classname.find('Conv') != -1:
         m.weight.data.normal_(0.0, 0.02)
     elif classname.find('BatchNorm') != -1:
@@ -689,7 +809,17 @@ def print_log(log_info, log_path, console=True):
 
 # save result pic and the coverImg filePath and the secretImg filePath
 def save_result_pic(this_batch_size, originalLabelvA, originalLabelvB, Container_allImg, secretLabelv, RevSecImg, RevCleanImgA, RevCleanImgB, diff, epoch, i, save_path):
+    '''
+    1 cover_img_A是原图（A域）
+    2 cover_imgv是B域的ground_truth图像b
+    3 container_img 是嵌入水印后的图片B'
+    4 secret_img是水印图像
+    5 rev_secret_img是从B'中提取的水印图像
+    6 clean_rev_secret_img_A 是从A中提取的水印图像（应为空白）
+    7 clean_rev_secret_img_B是从B中提取的水印图像（应为空白）
+    8 diff 是嵌入水印后的图像B'和不嵌入水印的图像的diff
 
+    '''
     with torch.no_grad():
         originalFramesA = originalLabelvA.reshape(
             this_batch_size, 1, opt.imageSize, opt.imageSize)
@@ -707,14 +837,26 @@ def save_result_pic(this_batch_size, originalLabelvA, originalLabelvB, Container
         revCleanFramesB = RevCleanImgB.reshape(
             this_batch_size, 1, opt.imageSize, opt.imageSize)
 
-        showResult = torch.cat([secretFrames, originalFramesA, revCleanFramesA, originalFramesB, revCleanFramesB, diff, container_allFrames,
-                                revSecFrames, ], 0)
+    '''
+    排列为： 
+    1 secret_img是水印图像
+    2 原图（A域）
+    3 是从A中提取的水印图像（应为空白）
+    4 B域的ground_truth图像b
+    5 从B中提取的水印图像（应为空白）
+    6 嵌入水印后的图像B'和不嵌入水印的图像的diff
+    7 嵌入水印后的图片B'
+    8 从B'中提取的水印图像
+    '''
+    showResult = torch.cat([secretFrames, originalFramesA, revCleanFramesA, originalFramesB, revCleanFramesB, diff, container_allFrames,
+                            revSecFrames, ], 0)
 
-        resultImgName = '%s/ResultPics_epoch%03d_batch%04d.png' % (
-            save_path, epoch, i)
+    resultImgName = '%s/ResultPics_epoch%03d_batch%04d.png' % (
+        save_path, epoch, i)
 
-        vutils.save_image(showResult, resultImgName,
-                        nrow=this_batch_size, padding=1, normalize=False)
+    vutils.save_image(showResult, resultImgName,
+                      nrow=this_batch_size, padding=1, normalize=False)
+
 
 class AverageMeter(object):
     """

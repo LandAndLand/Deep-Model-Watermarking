@@ -23,6 +23,10 @@ def weights_init(m):
 
 
 def get_norm_layer(norm_type='instance'):
+    # partial用来扩展函数
+    # affine： 一个布尔值，当设为true，给该层添加可学习的仿射变换参数，即γ与β
+    # track_running_stats：一个布尔值，当设置为True时，该模块跟踪运行的平均值和方差，
+    # 当设置为False时，该模块不跟踪此类统计数据，并且始终在train和eval模式中使用批处理统计数据。默认值:False
     if norm_type == 'batch':
         norm_layer = functools.partial(nn.BatchNorm2d, affine=True)
     elif norm_type == 'instance':
@@ -65,7 +69,6 @@ def define_G(input_nc, output_nc, ngf, which_model_netG, norm='batch', use_dropo
         netG = UnetGenerator(input_nc, output_nc, 8, ngf, norm_layer=norm_layer, use_dropout=use_dropout,
                              gpu_ids=gpu_ids, use_parallel=use_parallel, learn_residual=learn_residual)
                                                               
-
     else:
         raise NotImplementedError('Generator model name [%s] is not recognized' % which_model_netG)
     if len(gpu_ids) > 0:
@@ -437,8 +440,10 @@ class NLayerDiscriminator(nn.Module):
             use_bias = norm_layer == nn.InstanceNorm2d
 
         kw = 4
+        # padw: 2
         padw = int(np.ceil((kw - 1) / 2))
         sequence = [
+            # 3 64 4 2 
             nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw),
             nn.LeakyReLU(0.2, True)
         ]
@@ -456,13 +461,16 @@ class NLayerDiscriminator(nn.Module):
             ]
 
         nf_mult_prev = nf_mult
+        # min(8, 8 )
+        # nf_mult = 8
         nf_mult = min(2 ** n_layers, 8)
+        # 64, 64*8
         sequence += [
             nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=1, padding=padw, bias=use_bias),
             norm_layer(ndf * nf_mult),
             nn.LeakyReLU(0.2, True)
         ]
-
+        # D输出的是一个一通道的图像
         sequence += [nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]
 
         if use_sigmoid:

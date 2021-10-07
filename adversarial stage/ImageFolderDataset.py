@@ -127,7 +127,7 @@ class MyImageFolder(data.Dataset):
         for root, a , images in os.walk(self.dir):
             for i in images:
                 self.imgs.append((root, i))
-        #self.imgs = self.imgs[:16]
+        # self.imgs = self.imgs[:32]
         self.len = len(self.imgs)
         #print(self.len)
 
@@ -142,7 +142,7 @@ class MyImageFolder(data.Dataset):
         #path = self.image_list[index]
         path = self.imgs[index]
         img = self.loader(path)
-        img = trans.functional.resize(img, [256,512])
+        # img = trans.functional.resize(img, [256,256*4])
         if self.transform is not None:
             img = self.transform(img)
             #print(f"img size: {img.size()}")
